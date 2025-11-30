@@ -1,0 +1,66 @@
+﻿# Files to Remove Before Git Push
+========================================
+
+## Test Files (can be safely removed):
+- test_confidence_levels.py
+- test_fast_mode.py  
+- test_minimal.py
+- test_production_visual.py
+- test_quick_production.py
+- test_realtime_visual.py
+- test_sahi.py
+- test_super_fast.py
+- test_visdrone_comparison.py
+- view_test_results.py
+
+## Empty/Obsolete Python Files:
+- analytics.py (empty, functionality moved to interactive_analytics.py)
+- process_multicam_sahi_visdrone.py (empty)
+
+## Old/Redundant Files:
+- process_multicam_dedup.py (old version)
+- process_multicam_fast_dedup.py (old version)
+- process_production_system.py (redundant, using API server now)
+- estimate_processing_time.py (utility, not needed in production)
+- calculate_optimal_interval.py (utility, not needed in production)
+- cleanup_repo.py (meta file)
+- temp_frame.jpg (temporary file)
+
+## Frontend Backup Files (in frontend/src/pages/):
+- AnalysisPage_old.jsx
+- AnalysisPage_gradient.jsx  
+- AnalysisPage_professional.jsx
+
+## Large Model Files (optional - can redownload):
+- yolov8m.pt (6MB)
+- yolov8n.pt (6MB)
+- yolov8s.pt (22MB)
+- yolo11n.pt (6MB)
+- yolov8l.pt (83MB)
+- yolov8x.pt (136MB)
+
+## Directories to Clean:
+- __pycache__/ (Python cache)
+- .venv/ (virtual environment - should be in .gitignore)
+- venv/ (virtual environment - should be in .gitignore)
+- uploads/ (runtime data)
+- output/ (runtime results)
+- temp_frame.jpg (temporary file)
+- runs/detect/ and runs/train/ (training artifacts)
+
+## Keep These Important Files:
+ api_server.py (main backend)
+ interactive_analytics.py (core analytics)
+ vehicle.py (vehicle tracking logic)
+ fusion.py (multi-camera fusion)
+ main.py (entry point)
+ calibrate_cameras.py (camera calibration)
+ calibration.py (calibration logic)
+ process_multicam.py (multi-camera processing)
+ process_multicam_sahi.py (SAHI integration)
+ compare_models.py (model comparison utility)
+ analyze_results.py (results analysis)
+ requirements.txt (dependencies)
+ setup.py (setup script)
+ All frontend files
+ All documentation (.md files)

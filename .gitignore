@@ -64,12 +64,16 @@ output/
 results/
 *.csv
 *.log
+uploads/
+temp_*.jpg
+temp_*.png
 
 # Node.js / Frontend
 node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/build/
+frontend/.vite/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
