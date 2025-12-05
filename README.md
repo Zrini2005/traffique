@@ -44,6 +44,8 @@ Frontend runs at `http://localhost:5174`
 
 ## 📖 Usage
 
+### Simple Mode (Single Video)
+
 1. Open `http://localhost:5174` in your browser
 2. Select a video from local storage or upload one
 3. Navigate to any frame using the slider
@@ -54,13 +56,39 @@ Frontend runs at `http://localhost:5174`
 6. Toggle SAHI for improved accuracy (takes longer)
 7. View results and download CSV data
 
+### Advanced Mode (Multi-Camera)
+
+For analyzing multiple videos with overlapping coverage:
+
+1. Click **"Advanced Mode"** toggle in the header
+2. **Add camera videos** (2-5 cameras):
+   - **Upload**: Click "Upload Video Files" for new videos
+   - **Local**: Click "Use Local Videos" for large files (like D1F1_stab.mp4)
+3. **Calibrate each camera**:
+   - Click 4 ground reference points on frame
+   - Enter real-world coordinates (in meters)
+   - System calculates homography transformation
+4. Set analysis parameters (time window, SAHI)
+5. Process videos - system will:
+   - Detect vehicles in each camera independently
+   - Transform to world coordinates (meters)
+   - Fuse overlapping detections across cameras
+6. View fused results with real-world measurements
+
+📚 **See [MULTI_CAMERA_GUIDE.md](MULTI_CAMERA_GUIDE.md) for detailed calibration instructions**
+
 ## 🎯 Features
 
+- **Dual Modes**:
+  - **Simple Mode**: Single video analysis with pixel coordinates
+  - **Advanced Mode**: Multi-camera fusion with real-world coordinates (meters)
 - **VisDrone Model**: Specialized for aerial/traffic vehicle detection
 - **SAHI Integration**: Sliced detection for small objects (4.7× accuracy boost)
 - **Dual Analysis Modes**: 
   - Quick: Instant single-frame detection
   - Full: Track vehicles across time with velocity & trajectory
+- **Multi-Camera Fusion**: Calibrate and fuse detections from 2-5 overlapping cameras
+- **Homography Calibration**: Transform pixel coordinates to real-world meters
 - **Polygon ROI**: Focus analysis on specific road areas
 - **CSV Export**: Vehicle analytics with position, velocity, time data
 - **Local Video Support**: Reference large videos without uploading
@@ -88,6 +116,7 @@ Frontend runs at `http://localhost:5174`
 
 ## 📊 Output
 
+### Simple Mode
 Full mode generates `output/vehicle_analytics.csv` with:
 - Vehicle ID, class, frames tracked
 - Position (start/end x,y in pixels)
@@ -95,6 +124,15 @@ Full mode generates `output/vehicle_analytics.csv` with:
 - Total distance traveled
 - Time in scene
 - Full trajectory points
+
+### Advanced Mode
+Multi-camera fusion generates `output/multicamera_analytics.csv` with:
+- Global vehicle ID (unique across all cameras)
+- Cameras seen (which cameras detected this vehicle)
+- Position in **meters** (world coordinates)
+- Velocity in **meters per second**
+- Distance traveled in **meters**
+- Full trajectory in world coordinates
 
 ## ⚙️ Configuration
 
