@@ -68,11 +68,16 @@ def smooth_kalman(points: List[Tuple[float, float]], dt: float = 1.0, process_va
     It accepts `dt` for API compatibility though the simple filter here does
     not explicitly use `dt` in state propagation (kept for future extension).
     """
-    if not points:
-        return []
-
-    # Ensure no None values; perform simple linear interpolation first
-    pts = np.asarray(linear_interpolate(points), dtype=float)
+    # Handle numpy arrays properly
+    if isinstance(points, np.ndarray):
+        if len(points) == 0:
+            return np.array([])
+        pts = points.astype(float)
+    else:
+        if not points:
+            return []
+        # Ensure no None values; perform simple linear interpolation first
+        pts = np.asarray(linear_interpolate(points), dtype=float)
 
     # State estimate (position) and covariance per-dimension
     x = pts[0].astype(float).copy()
@@ -98,6 +103,9 @@ def smooth_kalman(points: List[Tuple[float, float]], dt: float = 1.0, process_va
 
         out.append((float(x[0]), float(x[1])))
 
+    # Return as numpy array if input was numpy array
+    if isinstance(points, np.ndarray):
+        return np.array(out, dtype=float)
     return out
 
 
