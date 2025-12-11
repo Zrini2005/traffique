@@ -60,7 +60,7 @@ checkpoints/
 wandb/
 
 # Output & Results
-output/
+
 results/
 *.csv
 *.log

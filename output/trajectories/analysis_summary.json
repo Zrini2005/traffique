@@ -1,0 +1,62 @@
+{
+  "video_path": "/mnt/c/Users/srini/Downloads/D1F1_stab.mp4",
+  "vehicles_analyzed": 716,
+  "vehicles_visualized": 5,
+  "selected_vehicles": {
+    "155": {
+      "class": "truck",
+      "frames_tracked": 150,
+      "first_frame": 9686,
+      "last_frame": 9835,
+      "duration_seconds": 5.96,
+      "distance_pixels": 1118.1107265228031,
+      "velocity_px_per_frame": 7.504098835723511,
+      "direction_degrees": 105.99034239310426,
+      "trajectory_points": 150
+    },
+    "99": {
+      "class": "truck",
+      "frames_tracked": 150,
+      "first_frame": 9686,
+      "last_frame": 9835,
+      "duration_seconds": 5.96,
+      "distance_pixels": 1089.8311457472175,
+      "velocity_px_per_frame": 7.314302991592064,
+      "direction_degrees": -1.9131009526296499,
+      "trajectory_points": 150
+    },
+    "129": {
+      "class": "truck",
+      "frames_tracked": 150,
+      "first_frame": 9686,
+      "last_frame": 9835,
+      "duration_seconds": 5.96,
+      "distance_pixels": 1088.1966618188446,
+      "velocity_px_per_frame": 7.303333300797615,
+      "direction_degrees": -0.6787682430691143,
+      "trajectory_points": 150
+    },
+    "186": {
+      "class": "awning-tricycle",
+      "frames_tracked": 150,
+      "first_frame": 9686,
+      "last_frame": 9835,
+      "duration_seconds": 5.96,
+      "distance_pixels": 1087.9332086604911,
+      "velocity_px_per_frame": 7.301565158795243,
+      "direction_degrees": 0.5654226456544673,
+      "trajectory_points": 150
+    },
+    "98": {
+      "class": "truck",
+      "frames_tracked": 150,
+      "first_frame": 9686,
+      "last_frame": 9835,
+      "duration_seconds": 5.96,
+      "distance_pixels": 1076.907649558585,
+      "velocity_px_per_frame": 7.227568117842853,
+      "direction_degrees": -0.816574372095829,
+      "trajectory_points": 150
+    }
+  }
+}
