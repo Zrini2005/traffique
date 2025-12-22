@@ -1,0 +1,10 @@
+{
+  "rmse_meters": 3.518836672884564,
+  "mean_error_meters": 3.3205668217269886,
+  "median_error_meters": 3.502050017073449,
+  "max_error_meters": 4.999998905318191,
+  "min_error_meters": 0.004398036834580771,
+  "matched_points": 2092747,
+  "total_csv1_points": 1244601,
+  "total_csv2_points": 1370686
+}

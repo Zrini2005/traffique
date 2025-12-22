@@ -507,7 +507,7 @@ def visualize_trajectories(video_path, vehicles, output_dir):
 def main():
     """Main function"""
     # Hardcoded video path
-    video_path = "/mnt/c/Users/srini/Downloads/D1F1_stab.mp4"
+    video_path = r"C:\Users\sakth\Documents\traffique_footage\D1F1_stab.mp4"
     
     if len(sys.argv) > 1:
         video_path = sys.argv[1]

@@ -1,0 +1,32 @@
+{
+  "total_unique_vehicles": 766615,
+  "total_raw_detections": 911828,
+  "duplicates_removed": 145213,
+  "duplicate_rate": 15.925481560118794,
+  "vehicles_per_camera": {
+    "D1F1_stab": 166170,
+    "D2F1_stab": 177657,
+    "D3F1_stab": 142095,
+    "D4F1_stab": 122627,
+    "D5F1_stab": 158066
+  },
+  "multi_camera_vehicles": 125617,
+  "vehicle_classes": {
+    "car": 303202,
+    "motor": 185321,
+    "van": 112020,
+    "truck": 66041,
+    "pedestrian": 61653,
+    "bus": 9557,
+    "bicycle": 7863,
+    "awning-tricycle": 7710,
+    "people": 7182,
+    "tricycle": 6066
+  },
+  "avg_confidence": 0.5040836508883579,
+  "processing_config": {
+    "slice_size": 320,
+    "frame_interval": 50,
+    "iou_threshold": 0.3
+  }
+}

@@ -277,14 +277,14 @@ class VehicleAnalyzer:
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
         
-        # Perform sliced inference
+        # Perform sliced inference with reduced overlap for speed
         result = get_sliced_prediction(
             frame,
             detection_model,
             slice_height=self.sahi_slice_size,
             slice_width=self.sahi_slice_size,
-            overlap_height_ratio=0.2,
-            overlap_width_ratio=0.2,
+            overlap_height_ratio=0.1,  # Reduced from 0.2 for speed
+            overlap_width_ratio=0.1,   # Reduced from 0.2 for speed
             verbose=0
         )
         

@@ -1,0 +1,22 @@
+{
+  "total_time": 1213.9263191223145,
+  "total_unique_vehicles": 120670,
+  "total_raw_detections": 126205,
+  "duplicate_rate": 4.385721643358032,
+  "multi_camera_vehicles": 5255,
+  "calibration_quality": {
+    "D3F1_stab": 1.0
+  },
+  "system_quality": 1.0,
+  "vehicle_classes": {
+    "car": 76610,
+    "truck": 18780,
+    "van": 13039,
+    "motor": 8398,
+    "bus": 1990,
+    "tricycle": 1115,
+    "awning-tricycle": 376,
+    "pedestrian": 361,
+    "bicycle": 1
+  }
+}
