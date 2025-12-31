@@ -60,56 +60,308 @@ class CoordinateMapper:
 
 
 class VehicleTracker:
-    """Simple IoU-based vehicle tracker"""
+    """Enhanced IoU-based vehicle tracker with ID persistence priority"""
     
-    def __init__(self, max_age=30, min_iou=0.3):
+    def __init__(self, max_age=60, min_iou=0.20):  # ID PERSISTENCE: Higher max_age, lower IoU
         self.tracks = {}
         self.next_id = 1
-        self.max_age = max_age
-        self.min_iou = min_iou
+        self.max_age = max_age  # MEDIUM - keeps tracks alive to prevent ID switching
+        self.min_iou = min_iou  # LOW - very permissive to maintain same ID
+        # Track history for motion prediction
+        self.track_history = {}  # track_id -> list of (frame, center, bbox)
+        self.frame_count = 0
     
     def update(self, detections):
-        """Update tracks with new detections"""
-        # Simple IoU matching
+        """Update tracks with new detections using IoU + spatial proximity + motion"""
+        self.frame_count += 1
         matched_tracks = {}
+        matched_detections = set()
         
-        for det in detections:
+        # Debug counters
+        iou_matches = 0
+        proximity_matches = 0
+        new_tracks = 0
+        
+        # Phase 1: IoU-based matching (primary method)
+        for det_idx, det in enumerate(detections):
             best_iou = 0
             best_track_id = None
+            
+            # Class-specific IoU thresholds (more permissive for small vehicles)
+            class_name = det.get('class_name', '')
+            if class_name in ['bicycle', 'tricycle', 'motor', 'motorcycle']:
+                min_iou_threshold = 0.15  # Very permissive for 2-wheelers
+            elif class_name in ['truck', 'bus']:
+                min_iou_threshold = 0.25  # Slightly higher for large vehicles
+            else:
+                min_iou_threshold = self.min_iou  # Default (0.20)
             
             for track_id, track in self.tracks.items():
                 if track['age'] < self.max_age:
                     iou = self._calculate_iou(det['bbox'], track['bbox'])
-                    if iou > best_iou and iou > self.min_iou:
+                    if iou > best_iou and iou > min_iou_threshold:
                         best_iou = iou
                         best_track_id = track_id
             
             if best_track_id:
+                iou_matches += 1
+                det_center = self._get_center(det['bbox'])
                 matched_tracks[best_track_id] = {
                     'bbox': det['bbox'],
                     'confidence': det['confidence'],
                     'class_name': det['class_name'],
-                    'age': 0
+                    'age': 0,
+                    'center': det_center
                 }
+                matched_detections.add(det_idx)
+                
+                # Update history
+                if best_track_id not in self.track_history:
+                    self.track_history[best_track_id] = []
+                self.track_history[best_track_id].append((self.frame_count, det_center, det['bbox']))
+                # Keep only last 10 frames
+                if len(self.track_history[best_track_id]) > 10:
+                    self.track_history[best_track_id].pop(0)
+        
+        # Phase 2: Spatial proximity + motion prediction for unmatched detections
+        unmatched_dets = [det for idx, det in enumerate(detections) if idx not in matched_detections]
+        
+        for det in unmatched_dets:
+            det_center = self._get_center(det['bbox'])
+            best_distance = float('inf')
+            best_track_id = None
+            
+            for track_id, track in self.tracks.items():
+                if track_id in matched_tracks:
+                    continue  # Already matched
+                
+                if track['age'] < self.max_age:
+                    # Predict next position based on motion history
+                    predicted_center = self._predict_position(track_id)
+                    
+                    # Calculate distance to predicted position
+                    distance = np.sqrt((det_center[0] - predicted_center[0])**2 + 
+                                     (det_center[1] - predicted_center[1])**2)
+                    
+                    # Get expected velocity and current track info
+                    expected_velocity = self._get_expected_velocity(track_id)
+                    last_center = self.track_history[track_id][-1][1] if track_id in self.track_history else predicted_center
+                    
+                    # CRITICAL: Direction and velocity consistency for congested traffic
+                    # Prevent ID mixing between nearby vehicles
+                    
+                    # Calculate detection's implied velocity from last known position
+                    if track_id in self.track_history and len(self.track_history[track_id]) >= 2:
+                        last_two = self.track_history[track_id][-2:]
+                        track_velocity = (
+                            (last_two[1][1][0] - last_two[0][1][0]) / max(last_two[1][0] - last_two[0][0], 1),
+                            (last_two[1][1][1] - last_two[0][1][1]) / max(last_two[1][0] - last_two[0][0], 1)
+                        )
+                        
+                        # Calculate detection velocity from last position
+                        det_velocity = (
+                            det_center[0] - last_center[0],
+                            det_center[1] - last_center[1]
+                        )
+                        
+                        # Check velocity similarity (cosine similarity)
+                        track_speed = np.sqrt(track_velocity[0]**2 + track_velocity[1]**2)
+                        det_speed = np.sqrt(det_velocity[0]**2 + det_velocity[1]**2)
+                        
+                        if track_speed > 1 and det_speed > 1:
+                            # Normalize and compare direction
+                            track_dir = (track_velocity[0] / track_speed, track_velocity[1] / track_speed)
+                            det_dir = (det_velocity[0] / det_speed, det_velocity[1] / det_speed)
+                            
+                            # Dot product gives direction similarity
+                            direction_similarity = track_dir[0] * det_dir[0] + track_dir[1] * det_dir[1]
+                            
+                            # Reject if moving in significantly different direction
+                            if direction_similarity < 0.5:  # Less than 60 degrees difference
+                                continue
+                    
+                    # RELAXED anti-jump checks - allow more natural motion
+                    # Was too strict and caused ID switching
+                    
+                    # Calculate actual movement from last position
+                    if track_id in self.track_history and len(self.track_history[track_id]) >= 2:
+                        last_center = self.track_history[track_id][-1][1]
+                        dx = det_center[0] - last_center[0]
+                        dy = det_center[1] - last_center[1]
+                        
+                        # Get expected velocity
+                        expected_velocity = self._get_expected_velocity(track_id)
+                        
+                        # RULE 1: Reasonable forward movement (balanced for congested traffic)
+                        if expected_velocity > 0:  # Vehicle is moving forward
+                            # Max allowed: 2.5x current velocity (prevents jumping to vehicle ahead)
+                            max_forward_jump = max(expected_velocity * 2.5, 50)  # Conservative
+                            if dx > max_forward_jump:
+                                # Likely jumped to vehicle ahead - reject!
+                                continue
+                        
+                        # RULE 2: Reasonable frame-to-frame movement
+                        if abs(dx) > 70:  # Balanced - prevents ID jumping in congestion
+                            continue
+                    
+                    # RULE 3: Class-specific distance threshold
+                    # 2-wheelers move faster and more erratically
+                    if det['class_name'] in ['bicycle', 'tricycle', 'motor', 'motorcycle']:
+                        max_reasonable_movement = 80  # More permissive for 2-wheelers
+                    else:
+                        max_reasonable_movement = 50  # Standard for cars/trucks
+                    
+                    if distance > max_reasonable_movement:
+                        continue
+                    
+                    # Check class similarity
+                    class_match = (det['class_name'] == track['class_name'] or
+                                 self._similar_class(det['class_name'], track['class_name']))
+                    
+                    # Check bounding box size consistency (prevent car/truck confusion)
+                    det_area = (det['bbox'][2] - det['bbox'][0]) * (det['bbox'][3] - det['bbox'][1])
+                    track_area = (track['bbox'][2] - track['bbox'][0]) * (track['bbox'][3] - track['bbox'][1])
+                    area_ratio = min(det_area, track_area) / max(det_area, track_area)
+                    
+                    # Reject if size too different (likely different vehicle)
+                    if area_ratio < 0.5:  # Size must be within 2x
+                        continue
+                    
+                    # BALANCED: Accept close proximity with consistency checks
+                    # Balance ID persistence with avoiding ID mixing
+                    if distance < 50 and class_match and distance < best_distance:  # Tighter for congestion
+                        best_distance = distance
+                        best_track_id = track_id
+            
+            if best_track_id:
+                proximity_matches += 1
+                matched_tracks[best_track_id] = {
+                    'bbox': det['bbox'],
+                    'confidence': det['confidence'],
+                    'class_name': det['class_name'],
+                    'age': 0,
+                    'center': det_center
+                }
+                
+                # Update history
+                if best_track_id not in self.track_history:
+                    self.track_history[best_track_id] = []
+                self.track_history[best_track_id].append((self.frame_count, det_center, det['bbox']))
+                if len(self.track_history[best_track_id]) > 10:
+                    self.track_history[best_track_id].pop(0)
             else:
                 # New track
+                new_tracks += 1
                 matched_tracks[self.next_id] = {
                     'bbox': det['bbox'],
                     'confidence': det['confidence'],
                     'class_name': det['class_name'],
-                    'age': 0
+                    'age': 0,
+                    'center': det_center
                 }
+                self.track_history[self.next_id] = [(self.frame_count, det_center, det['bbox'])]
                 self.next_id += 1
         
         # Age unmatched tracks
+        aged_tracks = 0
         for track_id, track in self.tracks.items():
             if track_id not in matched_tracks:
                 track['age'] += 1
+                aged_tracks += 1
                 if track['age'] < self.max_age:
                     matched_tracks[track_id] = track
         
+        # Debug output
+        if new_tracks > 0 or aged_tracks > 3:
+            print(f"      Tracker: {len(detections)} dets → IoU:{iou_matches} Prox:{proximity_matches} "
+                  f"New:{new_tracks} | Aged:{aged_tracks} tracks")
+        
         self.tracks = matched_tracks
         return self.tracks
+    
+    def _get_center(self, bbox):
+        """Get center point of bounding box"""
+        x1, y1, x2, y2 = bbox
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
+    
+    def _predict_position(self, track_id):
+        """Predict next position based on motion history"""
+        if track_id not in self.track_history or len(self.track_history[track_id]) < 2:
+            # No history, use current position
+            if track_id in self.tracks:
+                return self.tracks[track_id].get('center', (0, 0))
+            return (0, 0)
+        
+        history = self.track_history[track_id]
+        
+        # Use last 3 frames for velocity estimation
+        recent = history[-min(3, len(history)):]
+        
+        # Calculate average velocity
+        velocities = []
+        for i in range(1, len(recent)):
+            frame_diff = recent[i][0] - recent[i-1][0]
+            if frame_diff > 0:
+                vx = (recent[i][1][0] - recent[i-1][1][0]) / frame_diff
+                vy = (recent[i][1][1] - recent[i-1][1][1]) / frame_diff
+                velocities.append((vx, vy))
+        
+        if velocities:
+            avg_vx = np.mean([v[0] for v in velocities])
+            avg_vy = np.mean([v[1] for v in velocities])
+            
+            # Predict forward by age+1 frames
+            age = self.tracks.get(track_id, {}).get('age', 0)
+            
+            # Apply moderate velocity damping - balance between following vehicle and preventing overshoot
+            # Gradual reduction as track ages (less confidence in old velocity)
+            if age <= 5:
+                damping = 0.8  # Recent detection, trust velocity
+            elif age <= 12:
+                damping = 0.6  # Medium age, moderate damping
+            else:
+                damping = 0.4  # Old detection, strong damping (likely slowing down)
+            
+            last_center = history[-1][1]
+            predicted_x = last_center[0] + avg_vx * damping * (age + 1)
+            predicted_y = last_center[1] + avg_vy * damping * (age + 1)
+            
+            return (predicted_x, predicted_y)
+        
+        # Fallback to last known position
+        return history[-1][1]
+    
+    def _get_expected_velocity(self, track_id):
+        """Get expected velocity magnitude for a track"""
+        if track_id not in self.track_history or len(self.track_history[track_id]) < 2:
+            return 0
+        
+        history = self.track_history[track_id]
+        recent = history[-min(3, len(history)):]
+        
+        velocities = []
+        for i in range(1, len(recent)):
+            frame_diff = recent[i][0] - recent[i-1][0]
+            if frame_diff > 0:
+                vx = (recent[i][1][0] - recent[i-1][1][0]) / frame_diff
+                vy = (recent[i][1][1] - recent[i-1][1][1]) / frame_diff
+                velocities.append(np.sqrt(vx**2 + vy**2))
+        
+        return np.mean(velocities) if velocities else 0
+    
+    def _similar_class(self, class1, class2):
+        """Check if two vehicle classes are similar enough to be the same vehicle"""
+        # Group similar classes
+        similar_groups = [
+            {'car', 'van', 'truck', 'bus'},  # All vehicles
+            {'motor', 'bicycle', 'bike'},     # Two-wheelers
+        ]
+        
+        for group in similar_groups:
+            if class1.lower() in group and class2.lower() in group:
+                return True
+        
+        return False
     
     @staticmethod
     def _calculate_iou(box1, box2):
@@ -255,6 +507,19 @@ class VehicleAnalyzer:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         conf = float(box.conf[0])
                         
+                        # Quality filter: reject suspiciously small or malformed detections
+                        width = x2 - x1
+                        height = y2 - y1
+                        area = width * height
+                        aspect_ratio = width / height if height > 0 else 0
+                        
+                        # STRICT quality filters for precision:
+                        # - Min area: 600 pixels (larger vehicles only)
+                        # - Max aspect ratio: 4.0 (tighter bounds)
+                        # - Min aspect ratio: 0.3 (reject extreme shapes)
+                        if area < 600 or aspect_ratio > 4.0 or aspect_ratio < 0.3:
+                            continue
+                        
                         detections.append({
                             'bbox': [float(x1), float(y1), float(x2), float(y2)],
                             'confidence': conf,
@@ -277,14 +542,15 @@ class VehicleAnalyzer:
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
         
-        # Perform sliced inference with reduced overlap for speed
+        # Perform sliced inference with MAXIMUM overlap for best precision
+        # Maximum overlap ensures consistent high-quality detections
         result = get_sliced_prediction(
             frame,
             detection_model,
             slice_height=self.sahi_slice_size,
             slice_width=self.sahi_slice_size,
-            overlap_height_ratio=0.1,  # Reduced from 0.2 for speed
-            overlap_width_ratio=0.1,   # Reduced from 0.2 for speed
+            overlap_height_ratio=0.4,  # Maximum overlap for precision
+            overlap_width_ratio=0.4,   # Maximum overlap for precision
             verbose=0
         )
         
@@ -295,6 +561,19 @@ class VehicleAnalyzer:
             # Only include vehicle classes
             if cls in self.vehicle_classes:
                 bbox = obj.bbox.to_xyxy()
+                
+                # Quality filter: reject suspiciously small or malformed detections
+                width = bbox[2] - bbox[0]
+                height = bbox[3] - bbox[1]
+                area = width * height
+                aspect_ratio = width / height if height > 0 else 0
+                
+                # STRICT quality filters for precision:
+                # - Min area: 600 pixels (larger vehicles only)
+                # - Max aspect ratio: 4.0 (tighter bounds)
+                # - Min aspect ratio: 0.3 (reject extreme shapes)
+                if area < 600 or aspect_ratio > 4.0 or aspect_ratio < 0.3:
+                    continue
                 
                 detections.append({
                     'bbox': [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],

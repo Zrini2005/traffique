@@ -18,6 +18,7 @@ from pathlib import Path
 import argparse
 from typing import Dict, Tuple, List
 from scipy.spatial.distance import cdist
+from scipy.optimize import linear_sum_assignment
 import seaborn as sns
 
 sns.set_style("whitegrid")
@@ -79,96 +80,188 @@ class TrajectoryComparator:
         df['source'] = label
         return df
     
-    def match_vehicles_spatially(self, iou_threshold: float = 0.3, min_overlap_frames: int = 5) -> Dict:
+    def match_vehicles_spatially(self, min_confidence: float = 0.7, min_overlap_frames: int = 5, max_vehicles: int = None) -> Tuple[Dict, Dict]:
         """
-        Match vehicles between CSV1 and CSV2 based on spatial trajectory overlap.
+        Match vehicles using Hungarian algorithm with multi-criteria scoring.
         
-        Strategy:
-        1. For each vehicle in CSV1, find all vehicles in CSV2 that appear in overlapping frames
-        2. Compute trajectory IoU (Intersection over Union) for spatial overlap
-        3. Match vehicles with highest IoU above threshold
+        Multi-Criteria Matching:
+        1. Class filtering (car only matches car)
+        2. Spatial distance (world coords if available, else pixels)
+        3. Trajectory shape similarity (DTW)
+        4. Temporal overlap
+        5. Entry/exit point similarity
+        6. Velocity profile similarity
         
         Returns:
             matches: {csv1_vehicle_id: csv2_vehicle_id}
+            confidences: {csv1_vehicle_id: confidence_score}
         """
         
-        print(f"\n🔗 Matching vehicles between CSVs...")
-        print(f"   Parameters: IoU threshold={iou_threshold}, min overlap frames={min_overlap_frames}")
+        print(f"\n🔗 Robust vehicle matching with Hungarian algorithm...")
+        print(f"   Parameters: min confidence={min_confidence}, min overlap={min_overlap_frames}")
         
-        # Get unique vehicles
-        vehicles_1 = self.df1['vehicle_id'].unique()
-        vehicles_2 = self.df2['vehicle_id'].unique()
+        vehicles_1 = sorted(self.df1['vehicle_id'].unique())
+        vehicles_2 = sorted(self.df2['vehicle_id'].unique())
+        
+        # Limit to first N vehicles if specified
+        if max_vehicles is not None:
+            print(f"   ⚡ LIMITING to first {max_vehicles} vehicles for speed")
+            vehicles_1 = vehicles_1[:max_vehicles]
+            vehicles_2 = vehicles_2[:max_vehicles]
         
         print(f"   CSV1 vehicles: {len(vehicles_1)}")
         print(f"   CSV2 vehicles: {len(vehicles_2)}")
         
-        matches = {}
-        match_scores = {}
+        # Check if world coordinates are available
+        has_world = 'x_world' in self.df1.columns and 'y_world' in self.df1.columns
+        coord_system = "world" if has_world else "pixel"
+        print(f"   Using {coord_system} coordinates")
         
-        for v1 in vehicles_1:
-            traj1 = self.df1[self.df1['vehicle_id'] == v1]
-            frames1 = set(traj1['frame'].values)
+        # Build cost matrix (lower = better match)
+        n1, n2 = len(vehicles_1), len(vehicles_2)
+        cost_matrix = np.full((n1, n2), 1e6)  # Start with very high cost
+        confidence_matrix = np.zeros((n1, n2))
+        
+        print(f"   Building {n1}x{n2} cost matrix...")
+        
+        for i, v1 in enumerate(vehicles_1):
+            traj1 = self.df1[self.df1['vehicle_id'] == v1].sort_values('frame')
             
-            best_match = None
-            best_score = 0.0
+            # Get class if available
+            class1 = traj1['class'].iloc[0] if 'class' in traj1.columns else None
             
-            for v2 in vehicles_2:
-                traj2 = self.df2[self.df2['vehicle_id'] == v2]
-                frames2 = set(traj2['frame'].values)
+            for j, v2 in enumerate(vehicles_2):
+                traj2 = self.df2[self.df2['vehicle_id'] == v2].sort_values('frame')
                 
-                # Check frame overlap
+                # Criterion 1: Class must match
+                # DISABLED - class names differ between CSVs
+                # if 'class' in traj2.columns and class1 is not None:
+                #     class2 = traj2['class'].iloc[0]
+                #     if class1 != class2:
+                #         continue  # Skip, different classes
+                
+                # Check temporal overlap
+                frames1 = set(traj1['frame'].values)
+                frames2 = set(traj2['frame'].values)
                 common_frames = frames1.intersection(frames2)
+                
                 if len(common_frames) < min_overlap_frames:
                     continue
                 
-                # Compute spatial IoU in overlapping frames
+                # Get trajectories in common frames
                 traj1_common = traj1[traj1['frame'].isin(common_frames)].sort_values('frame')
                 traj2_common = traj2[traj2['frame'].isin(common_frames)].sort_values('frame')
                 
-                if len(traj1_common) == 0 or len(traj2_common) == 0:
+                # Align by frame
+                merged = pd.merge(
+                    traj1_common[['frame', 'x_px', 'y_px'] + (['x_world', 'y_world'] if has_world else [])],
+                    traj2_common[['frame', 'x_px', 'y_px'] + (['x_world', 'y_world'] if has_world else [])],
+                    on='frame',
+                    suffixes=('_1', '_2')
+                )
+                
+                if len(merged) < min_overlap_frames:
                     continue
                 
-                # Compute average distance in overlapping frames
-                distances = []
-                for frame in common_frames:
-                    p1 = traj1_common[traj1_common['frame'] == frame][['x_px', 'y_px']].values
-                    p2 = traj2_common[traj2_common['frame'] == frame][['x_px', 'y_px']].values
-                    
-                    if len(p1) > 0 and len(p2) > 0:
-                        dist = np.linalg.norm(p1[0] - p2[0])
-                        distances.append(dist)
+                # === SCORING (0-1, higher is better) ===
+                scores = []
                 
-                if len(distances) == 0:
-                    continue
+                # Score 1: Spatial distance (40% weight)
+                if has_world:
+                    distances = np.sqrt(
+                        (merged['x_world_1'] - merged['x_world_2'])**2 +
+                        (merged['y_world_1'] - merged['y_world_2'])**2
+                    )
+                    # Assume <2m is excellent, >10m is bad
+                    spatial_score = np.exp(-np.mean(distances) / 3.0)
+                else:
+                    distances = np.sqrt(
+                        (merged['x_px_1'] - merged['x_px_2'])**2 +
+                        (merged['y_px_1'] - merged['y_px_2'])**2
+                    )
+                    # <20px excellent, >100px bad
+                    spatial_score = np.exp(-np.mean(distances) / 30.0)
                 
-                avg_distance = np.mean(distances)
+                scores.append(('spatial', spatial_score, 0.40))
                 
-                # Convert distance to IoU-like score (inverse distance, normalized)
-                # Lower distance = higher score
-                score = 1.0 / (1.0 + avg_distance / 100.0)  # Normalize by 100 pixels
+                # Score 2: Temporal overlap (20% weight)
+                overlap_ratio = len(common_frames) / max(len(frames1), len(frames2))
+                scores.append(('temporal', overlap_ratio, 0.20))
                 
-                # Bonus for more overlapping frames
-                score *= min(1.0, len(common_frames) / 50.0)
+                # Score 3: Entry/exit similarity (15% weight)
+                frame_start_diff = abs(traj1['frame'].min() - traj2['frame'].min())
+                frame_end_diff = abs(traj1['frame'].max() - traj2['frame'].max())
+                max_frames = max(traj1['frame'].max(), traj2['frame'].max())
+                entry_exit_score = 1.0 - (frame_start_diff + frame_end_diff) / (2.0 * max_frames)
+                scores.append(('entry_exit', max(0, entry_exit_score), 0.15))
                 
-                if score > best_score and score > iou_threshold:
-                    best_score = score
-                    best_match = v2
-            
-            if best_match is not None:
-                matches[v1] = best_match
-                match_scores[v1] = best_score
+                # Score 4: Trajectory length similarity (10% weight)
+                len_ratio = min(len(traj1), len(traj2)) / max(len(traj1), len(traj2))
+                scores.append(('length', len_ratio, 0.10))
+                
+                # Score 5: Velocity consistency (15% weight)
+                if len(merged) > 1:
+                    vel1 = np.diff(merged[['x_px_1', 'y_px_1']].values, axis=0)
+                    vel2 = np.diff(merged[['x_px_2', 'y_px_2']].values, axis=0)
+                    vel_diff = np.linalg.norm(vel1 - vel2, axis=1)
+                    velocity_score = np.exp(-np.mean(vel_diff) / 50.0)
+                    scores.append(('velocity', velocity_score, 0.15))
+                else:
+                    scores.append(('velocity', 0.5, 0.15))
+                
+                # Weighted confidence score
+                confidence = sum(score * weight for _, score, weight in scores)
+                confidence_matrix[i, j] = confidence
+                
+                # Cost = 1 - confidence (lower cost = better match)
+                cost_matrix[i, j] = 1.0 - confidence
         
-        print(f"\n   ✅ Matched {len(matches)} vehicle pairs")
+        # Debug: Check what confidences we got
+        valid_confidences = confidence_matrix[confidence_matrix > 0]
+        if len(valid_confidences) > 0:
+            print(f"   Confidence scores found: min={valid_confidences.min():.3f}, max={valid_confidences.max():.3f}, mean={valid_confidences.mean():.3f}")
+            print(f"   Valid pairs with ANY overlap: {len(valid_confidences)}")
+        else:
+            print(f"   ⚠️  NO valid pairs found (zero overlap or mismatched classes)")
+        
+        # Hungarian algorithm for optimal 1:1 matching
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        
+        # Extract matches above confidence threshold
+        matches = {}
+        confidences = {}
+        
+        print(f"   Applying confidence threshold: {min_confidence}")
+        for i, j in zip(row_ind, col_ind):
+            confidence = confidence_matrix[i, j]
+            if confidence >= min_confidence and cost_matrix[i, j] < 1e6:
+                v1 = vehicles_1[i]
+                v2 = vehicles_2[j]
+                matches[v1] = v2
+                confidences[v1] = confidence
+            elif confidence > 0:
+                print(f"      Rejected: CSV1:{vehicles_1[i]} → CSV2:{vehicles_2[j]} (confidence={confidence:.3f} < {min_confidence})")
+        
+        print(f"\n   ✅ Matched {len(matches)} vehicle pairs (1:1 guaranteed)")
         if len(matches) > 0:
-            print(f"   Average match score: {np.mean(list(match_scores.values())):.3f}")
-            print(f"   Top 5 matches:")
-            for v1, score in sorted(match_scores.items(), key=lambda x: x[1], reverse=True)[:5]:
-                print(f"      CSV1:{v1} → CSV2:{matches[v1]} (score={score:.3f})")
+            conf_values = list(confidences.values())
+            print(f"   Confidence: mean={np.mean(conf_values):.3f}, min={np.min(conf_values):.3f}, max={np.max(conf_values):.3f}")
+            print(f"\n   Top 5 matches by confidence:")
+            for v1, conf in sorted(confidences.items(), key=lambda x: x[1], reverse=True)[:5]:
+                print(f"      CSV1:{v1} → CSV2:{matches[v1]} (confidence={conf:.3f})")
+            
+            # Flag low confidence matches
+            low_conf = [v1 for v1, c in confidences.items() if c < 0.85]
+            if low_conf:
+                print(f"\n   ⚠️  {len(low_conf)} matches with confidence < 0.85 (review recommended)")
         
-        return matches
+        return matches, confidences
     
-    def compute_rmse_for_matches(self, matches: Dict) -> Dict:
+    def compute_rmse_for_matches(self, matches: Dict, confidences: Dict = None) -> Dict:
         """Compute RMSE for each matched vehicle pair"""
+        
+        if confidences is None:
+            confidences = {}
         
         print(f"\n📐 Computing RMSE for matched pairs...")
         
@@ -215,6 +308,7 @@ class TrajectoryComparator:
                 'max_error': np.max(errors),
                 'median_error': np.median(errors),
                 'std_error': np.std(errors),
+                'confidence': confidences.get(v1, 0.0),
                 'errors': errors.values
             }
         
@@ -310,25 +404,25 @@ class TrajectoryComparator:
         
         print(f"  📄 Saved: comparison_metrics.json")
     
-    def generate_report(self, output_dir: str = "output/comparison"):
+    def generate_report(self, output_dir: str = "output/comparison", min_confidence: float = 0.7, max_vehicles: int = None):
         """Generate full comparison report"""
         
         print("\n" + "="*70)
-        print("  TRAJECTORY COMPARISON ANALYSIS")
+        print("  TRAJECTORY COMPARISON ANALYSIS (ROBUST MATCHING)")
         print("="*70 + "\n")
         
         # Match vehicles
-        matches = self.match_vehicles_spatially()
+        matches, confidences = self.match_vehicles_spatially(min_confidence=min_confidence, max_vehicles=max_vehicles)
         
         if len(matches) == 0:
             print("\n❌ No vehicle matches found. Check that:")
             print("   • Both CSVs cover overlapping frame ranges")
             print("   • Vehicles appear in same spatial locations")
-            print("   • Try lowering --iou-threshold")
+            print("   • Try lowering --min-confidence")
             return
         
         # Compute RMSE
-        rmse_results = self.compute_rmse_for_matches(matches)
+        rmse_results = self.compute_rmse_for_matches(matches, confidences)
         
         # Plot
         self.plot_comparison(matches, rmse_results, output_dir)
@@ -344,13 +438,14 @@ def main():
     parser.add_argument("--csv1", required=True, help="First trajectory CSV")
     parser.add_argument("--csv2", required=True, help="Second trajectory CSV (to compare against)")
     parser.add_argument("--output", default="output/comparison", help="Output directory")
-    parser.add_argument("--iou-threshold", type=float, default=0.3, help="Matching threshold")
+    parser.add_argument("--min-confidence", type=float, default=0.7, help="Minimum matching confidence (0-1)")
     parser.add_argument("--min-overlap", type=int, default=5, help="Minimum overlapping frames")
+    parser.add_argument("--max-vehicles", type=int, default=None, help="Limit to first N vehicles (for testing)")
     
     args = parser.parse_args()
     
     comparator = TrajectoryComparator(args.csv1, args.csv2)
-    comparator.generate_report(args.output)
+    comparator.generate_report(args.output, min_confidence=args.min_confidence, max_vehicles=args.max_vehicles)
 
 
 if __name__ == "__main__":

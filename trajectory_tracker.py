@@ -146,27 +146,28 @@ class TrajectorySmootherAdvanced:
     
     @staticmethod
     def ensemble_smooth(trajectory: np.ndarray) -> np.ndarray:
-        """Combine multiple smoothing techniques"""
+        """
+        ZERO-LAG smoothing - removes only outliers, NO FILTERING
+        Previous smoothing (Kalman + Savitzky-Golay) introduced temporal lag
+        causing trajectories to not sync with actual vehicle motion
+        
+        CRITICAL: For real-time tracking accuracy, we must use RAW detections
+        Any temporal filtering causes the trajectory to lag behind actual position
+        """
         
         if len(trajectory) < 3:
             return trajectory
         
-        # Step 1: Remove outliers
-        cleaned = TrajectorySmootherAdvanced.remove_outliers(trajectory, threshold=3.0)
+        # ONLY remove severe outliers (detection glitches)
+        # Keep everything else exactly as detected
+        cleaned = TrajectorySmootherAdvanced.remove_outliers(trajectory, threshold=5.0)  # Very permissive
         
-        # Step 2: Kalman filter (handles noise well)
-        kalman = TrajectorySmootherAdvanced.kalman_smooth(cleaned, process_noise=0.05)
+        # NO KALMAN - causes lag
+        # NO SAVGOL - causes lag
+        # NO GAUSSIAN - causes lag
         
-        # Step 3: Savitzky-Golay (preserves features)
-        if len(kalman) >= 7:
-            savgol = TrajectorySmootherAdvanced.savitzky_golay_smooth(kalman, window_length=7, polyorder=2)
-        else:
-            savgol = kalman
-        
-        # Step 4: Light Gaussian (final smoothing)
-        final = TrajectorySmootherAdvanced.gaussian_smooth(savgol, sigma=1.0)
-        
-        return final
+        # Return nearly raw detections (only outliers removed)
+        return cleaned
 
 
 class VehicleTrajectoryTracker:
@@ -178,11 +179,12 @@ class VehicleTrajectoryTracker:
         self,
         video_path: str,
         confidence_threshold: float = 0.25,
-        min_trajectory_length: int = 10,
+        min_trajectory_length: int = 5,
         meters_per_pixel: Optional[float] = None,
         homography_matrix: Optional[np.ndarray] = None,
         homography_json: Optional[str] = None,
-        roi_polygon: Optional[List[Tuple[int, int]]] = None
+        roi_polygon: Optional[List[Tuple[int, int]]] = None,
+        use_sahi: bool = True
     ):
         # Resolve video path - check multiple locations
         video_path = self._resolve_video_path(video_path)
@@ -192,15 +194,16 @@ class VehicleTrajectoryTracker:
         self.meters_per_pixel = meters_per_pixel
         self.homography_matrix = homography_matrix
         self.roi_polygon = roi_polygon
+        self.use_sahi = use_sahi
         
         # Load homography from JSON if provided
         if homography_json and not homography_matrix:
             self.homography_matrix = self._load_homography_from_json(homography_json)
         
-        # Initialize video analyzer with optimized SAHI settings
+        # Initialize video analyzer with configurable SAHI settings
         self.analyzer = VehicleAnalyzer(
             model_conf=confidence_threshold,
-            use_sahi=True,
+            use_sahi=use_sahi,
             sahi_slice_size=1280  # Larger = faster, 1280 for 4K video
         )
         
@@ -208,8 +211,11 @@ class VehicleTrajectoryTracker:
         print("Loading VisDrone detection model...")
         self.analyzer.load_model()
         
-        # Initialize tracker
-        self.tracker = VehicleTracker(min_iou=0.25, max_age=30)
+        # Initialize tracker with settings to PREVENT ID FRAGMENTATION
+        # min_iou=0.20: LOW - very permissive matching to keep same ID
+        # max_age=60: MEDIUM - keep tracks alive during brief occlusions
+        # Balance: Persistent IDs vs responsiveness
+        self.tracker = VehicleTracker(min_iou=0.20, max_age=60)
         
         # Storage for trajectories
         self.raw_trajectories: Dict[int, List[np.ndarray]] = defaultdict(list)
@@ -321,38 +327,55 @@ class VehicleTrajectoryTracker:
             if not ret:
                 break
             
-            # Crop frame to ROI if specified (for speed)
-            if self.roi_polygon and len(self.roi_polygon) == 4:
-                # Simple rectangular crop
-                y_min = min(p[1] for p in self.roi_polygon)
-                y_max = max(p[1] for p in self.roi_polygon)
-                x_min = min(p[0] for p in self.roi_polygon)
-                x_max = max(p[0] for p in self.roi_polygon)
-                
-                # Crop and adjust ROI coordinates
-                frame = frame[y_min:y_max, x_min:x_max]
-                roi = [(0, 0), (x_max-x_min, 0), (x_max-x_min, y_max-y_min), (0, y_max-y_min)]
-                
-                # Store offset for coordinate correction
-                offset_x = x_min
-                offset_y = y_min
-            else:
-                offset_x = 0
-                offset_y = 0
+            # Set ROI and handle cropping
+            roi = None
+            offset_x = 0
+            offset_y = 0
+            
+            if self.roi_polygon:
+                if len(self.roi_polygon) == 4:
+                    # Simple rectangular crop for 4-point ROI
+                    y_min = min(p[1] for p in self.roi_polygon)
+                    y_max = max(p[1] for p in self.roi_polygon)
+                    x_min = min(p[0] for p in self.roi_polygon)
+                    x_max = max(p[0] for p in self.roi_polygon)
+                    
+                    # Crop and adjust ROI coordinates
+                    frame = frame[y_min:y_max, x_min:x_max]
+                    roi = [(0, 0), (x_max-x_min, 0), (x_max-x_min, y_max-y_min), (0, y_max-y_min)]
+                    
+                    # Store offset for coordinate correction
+                    offset_x = x_min
+                    offset_y = y_min
+                else:
+                    # For non-rectangular ROI, pass the polygon directly
+                    roi = self.roi_polygon
             
             # Detect vehicles
             result = self.analyzer.analyze_frame(frame, roi)
             detections = result['roi_vehicles']
             
+            # Debug: Print detection info every frame
+            if len(detections) > 0:
+                conf_str = ', '.join([f"{d['confidence']:.2f}" for d in detections[:3]])
+                print(f"    Frame {frame_count}: {len(detections)} detections | "
+                      f"Confidences: [{conf_str}]")
+            
             # Update tracker
             tracked_objects = self.tracker.update(detections)
             
-            # Store positions
+            # Debug: Print tracking info
+            active_tracks = len([t for t in tracked_objects.values() if t['age'] == 0])
+            if active_tracks != len(detections):
+                print(f"    ⚠️  Frame {frame_count}: {len(detections)} detections → {active_tracks} matched tracks "
+                      f"({len(detections) - active_tracks} lost)")
+            
+            # Store positions - USE CENTER for top-down drone videos
             for vehicle_id, track_data in tracked_objects.items():
                 bbox = track_data['bbox']
                 center = np.array([
-                    (bbox[0] + bbox[2]) / 2 + offset_x,  # Add offset back
-                    (bbox[1] + bbox[3]) / 2 + offset_y   # Add offset back
+                    (bbox[0] + bbox[2]) / 2 + offset_x,  # X: center
+                    (bbox[1] + bbox[3]) / 2 + offset_y   # Y: center
                 ])
                 self.raw_trajectories[vehicle_id].append(center)
                 self.frame_indices[vehicle_id].append(frame_count)
@@ -362,7 +385,7 @@ class VehicleTrajectoryTracker:
                     self.vehicle_classes[vehicle_id] = track_data.get('class_name', 'vehicle')
             
             processed += 1
-            if processed % 50 == 0:
+            if processed % 1 == 0:
                 print(f"  ⏳ Processed {processed}/{frames_to_process} frames... "
                       f"({len(self.raw_trajectories)} vehicles tracked)")
             
@@ -375,6 +398,9 @@ class VehicleTrajectoryTracker:
         
         # Smooth all trajectories
         self._smooth_all_trajectories()
+        
+        # NOTE: Post-processing merge DISABLED - was incorrectly combining unrelated vehicles
+        # ID consistency is handled at tracker level through IoU matching
         
         # Store the final frame for visualization
         self.final_frame_number = end_frame - 1
@@ -400,6 +426,107 @@ class VehicleTrajectoryTracker:
         
         print(f"   ✅ Smoothed {valid_count} valid trajectories")
         print(f"   ❌ Filtered out {len(self.raw_trajectories) - valid_count} short tracks")
+    
+    def _merge_fragmented_trajectories(self) -> int:
+        """
+        Merge trajectory fragments that likely belong to the same vehicle.
+        This fixes ID fragmentation caused by occlusions or brief detection losses.
+        Returns number of fragments merged.
+        """
+        merged_count = 0
+        ids_to_merge = []  # List of (target_id, source_id) pairs
+        
+        # Get all vehicle IDs sorted by first frame
+        all_ids = sorted(self.raw_trajectories.keys(), 
+                        key=lambda vid: self.frame_indices[vid][0])
+        
+        for i, vid1 in enumerate(all_ids):
+            if vid1 in [src for _, src in ids_to_merge]:  # Already marked for merging
+                continue
+                
+            traj1 = self.raw_trajectories[vid1]
+            frames1 = self.frame_indices[vid1]
+            class1 = self.vehicle_classes.get(vid1, '')
+            
+            if len(frames1) < 5:  # Skip very short trajectories
+                continue
+            
+            last_frame1 = frames1[-1]
+            last_pos1 = traj1[-1]
+            
+            # Look for nearby trajectories that start shortly after this one ends
+            for vid2 in all_ids[i+1:]:
+                if vid2 in [src for _, src in ids_to_merge]:
+                    continue
+                
+                traj2 = self.raw_trajectories[vid2]
+                frames2 = self.frame_indices[vid2]
+                class2 = self.vehicle_classes.get(vid2, '')
+                
+                # Must be same vehicle class
+                if class1 != class2:
+                    continue
+                
+                first_frame2 = frames2[0]
+                first_pos2 = traj2[0]
+                
+                # Check temporal gap (must start within 30 frames of vid1 ending)
+                frame_gap = first_frame2 - last_frame1
+                if frame_gap < 1 or frame_gap > 30:
+                    continue
+                
+                # Check spatial distance (must be close in position)
+                spatial_dist = np.linalg.norm(first_pos2 - last_pos1)
+                
+                # Estimate expected distance based on gap
+                # Assume max 5 pixels/frame movement for vehicles
+                max_expected_dist = frame_gap * 5
+                
+                if spatial_dist > max_expected_dist or spatial_dist > 80:
+                    continue
+                
+                # Check trajectory direction similarity
+                if len(traj1) >= 3 and len(traj2) >= 3:
+                    # Direction at end of traj1
+                    dir1 = traj1[-1] - traj1[-3]
+                    dir1_norm = dir1 / (np.linalg.norm(dir1) + 1e-6)
+                    
+                    # Direction at start of traj2
+                    dir2 = traj2[2] - traj2[0] if len(traj2) > 2 else traj2[-1] - traj2[0]
+                    dir2_norm = dir2 / (np.linalg.norm(dir2) + 1e-6)
+                    
+                    # Cosine similarity
+                    direction_sim = np.dot(dir1_norm, dir2_norm)
+                    
+                    # Must be moving in similar direction (>0.7 = ~45 degrees)
+                    if direction_sim < 0.7:
+                        continue
+                
+                # Found a match! Mark for merging
+                ids_to_merge.append((vid1, vid2))
+                merged_count += 1
+                break  # Only merge one fragment at a time per trajectory
+        
+        # Perform the merging
+        for target_id, source_id in ids_to_merge:
+            # Merge source into target
+            self.raw_trajectories[target_id].extend(self.raw_trajectories[source_id])
+            self.frame_indices[target_id].extend(self.frame_indices[source_id])
+            
+            # Sort by frame index
+            sorted_indices = np.argsort(self.frame_indices[target_id])
+            self.raw_trajectories[target_id] = [self.raw_trajectories[target_id][i] for i in sorted_indices]
+            self.frame_indices[target_id] = [self.frame_indices[target_id][i] for i in sorted_indices]
+            
+            # Remove source trajectory
+            del self.raw_trajectories[source_id]
+            del self.frame_indices[source_id]
+            if source_id in self.vehicle_classes:
+                del self.vehicle_classes[source_id]
+            if source_id in self.smooth_trajectories:
+                del self.smooth_trajectories[source_id]
+        
+        return merged_count
     
     def visualize_all_trajectories(
         self,
@@ -747,7 +874,7 @@ def main():
     parser.add_argument("--frames", type=int, default=200, help="Number of frames to process (-1 for full video)")
     parser.add_argument("--output", default="output/trajectories", help="Output directory")
     parser.add_argument("--top-k", type=int, default=5, help="Number of individual trajectories to visualize")
-    parser.add_argument("--confidence", type=float, default=0.25, help="Detection confidence threshold")
+    parser.add_argument("--confidence", type=float, default=0.45, help="Detection confidence threshold")
     parser.add_argument("--min-length", type=int, default=10, help="Minimum trajectory length")
     parser.add_argument("--meters-per-pixel", type=float, default=None,
                         help="Scale to convert pixel distances to meters (meters per pixel)")
