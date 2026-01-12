@@ -1,0 +1,14 @@
+ultralytics
+opencv-python
+numpy
+torch
+torchvision
+sahi
+huggingface_hub
+flask
+flask-cors
+label-studio
+label-studio-converter
+Pillow
+PyYAML
+tqdm
