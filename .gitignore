@@ -48,6 +48,10 @@ ENV/
 env.bak/
 venv.bak/
 
+# Large CSV data files
+*.csv
+D2F1_lclF_v.csv
+
 # IDES
 .vscode/
 .idea/
